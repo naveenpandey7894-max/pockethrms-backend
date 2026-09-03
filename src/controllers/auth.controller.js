@@ -174,7 +174,6 @@
 //   }
 // };
 
-
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const prisma = require("../config/prisma");
@@ -216,6 +215,7 @@ exports.register = async (req, res, next) => {
 
     const normalizedEmail = email?.toLowerCase().trim();
     const finalEmpCode = empCode?.trim() || `EMP${Date.now().toString().slice(-4)}`;
+    const userRole = role || "EMPLOYEE";
 
     // 1. Verify if user email or empCode already exists
     const existingUser = await prisma.user.findUnique({ where: { email: normalizedEmail } });
@@ -230,6 +230,10 @@ exports.register = async (req, res, next) => {
 
     // 2. Wrap creation in a Prisma Transaction
     const newUser = await prisma.$transaction(async (tx) => {
+      // Determine default names based on role
+      const defaultDeptName = userRole === "HR" ? "Human Resources" : "IT";
+      const defaultDesigName = userRole === "HR" ? "HR Manager" : "Software Engineer";
+
       // Resolve Department
       let targetDeptId = departmentId ? parseInt(departmentId, 10) : null;
       if (targetDeptId) {
@@ -239,9 +243,9 @@ exports.register = async (req, res, next) => {
 
       if (!targetDeptId) {
         const defaultDept = await tx.department.upsert({
-          where: { name: 'IT' },
+          where: { name: defaultDeptName },
           update: {},
-          create: { name: 'IT' },
+          create: { name: defaultDeptName },
         });
         targetDeptId = defaultDept.id;
       }
@@ -255,12 +259,12 @@ exports.register = async (req, res, next) => {
 
       if (!targetDesigId) {
         let defaultDesig = await tx.designation.findFirst({
-          where: { departmentId: targetDeptId },
+          where: { name: defaultDesigName, departmentId: targetDeptId },
         });
         if (!defaultDesig) {
           defaultDesig = await tx.designation.create({
             data: {
-              name: 'Software Engineer',
+              name: defaultDesigName,
               departmentId: targetDeptId,
             },
           });
@@ -277,7 +281,7 @@ exports.register = async (req, res, next) => {
           name,
           email: normalizedEmail,
           password: hashedPassword,
-          role: role || "EMPLOYEE",
+          role: userRole,
           employee: {
             create: {
               empCode: finalEmpCode,

@@ -1,0 +1,1 @@
+const { PrismaClient } = require('@prisma/client'); const prisma = new PrismaClient(); async function main() { await prisma.$executeRawUnsafe('TRUNCATE TABLE "User", "Employee", "Department", "Designation" RESTART IDENTITY CASCADE;'); console.log('Database reset success!'); } main().finally(() =
