@@ -175,7 +175,6 @@
 // };
 
 
-
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const prisma = require("../config/prisma");
@@ -185,7 +184,6 @@ const prisma = require("../config/prisma");
  * Includes essential user identity and employee details in payload
  */
 function generateTokens(user) {
-  // Payload for JWT tokens
   const payload = {
     id: user.id,
     email: user.email,
@@ -193,14 +191,12 @@ function generateTokens(user) {
     employeeId: user.employee ? user.employee.id : null,
   };
 
-  // Generate Access Token (Short-lived)
   const accessToken = jwt.sign(
     payload,
     process.env.JWT_SECRET || 'secret',
     { expiresIn: process.env.JWT_EXPIRES_IN || '1d' }
   );
 
-  // Generate Refresh Token (Long-lived)
   const refreshToken = jwt.sign(
     payload,
     process.env.JWT_REFRESH_SECRET || 'refreshSecret',
@@ -232,7 +228,6 @@ exports.register = async (req, res, next) => {
       if (!deptExists) targetDeptId = null;
     }
 
-    // Create default 'IT' department if no valid department ID was supplied
     if (!targetDeptId) {
       const defaultDept = await prisma.department.upsert({
         where: { name: 'IT' },
@@ -249,7 +244,6 @@ exports.register = async (req, res, next) => {
       if (!desigExists) targetDesigId = null;
     }
 
-    // Create default designation under target department if missing
     if (!targetDesigId) {
       let defaultDesig = await prisma.designation.findFirst({
         where: { departmentId: targetDeptId },
@@ -265,10 +259,10 @@ exports.register = async (req, res, next) => {
       targetDesigId = defaultDesig.id;
     }
 
-    // 4. Hash user password for secure storage
+    // 4. Hash user password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // 5. Create User and linked Employee entity in a single transaction
+    // 5. Create User and linked Employee record
     const user = await prisma.user.create({
       data: {
         name,
@@ -294,7 +288,6 @@ exports.register = async (req, res, next) => {
       },
     });
 
-    // Remove hashed password from output response
     const { password: _, ...userWithoutPassword } = user;
 
     return res.status(201).json({
@@ -309,21 +302,33 @@ exports.register = async (req, res, next) => {
 
 /**
  * @route   POST /api/auth/login
- * @desc    Authenticate user credentials and return Tokens + User profile details
+ * @desc    Authenticate via Email OR Employee Code (+ Optional Company Code)
  * @access  Public
  */
 exports.login = async (req, res, next) => {
   try {
-    const { email, password } = req.body;
+    const { email, userIdentifier, empCode, password, companyCode } = req.body;
 
-    // 1. Fetch user by email including nested Employee, Designation, and Department details
-    const user = await prisma.user.findUnique({
-      where: { email },
+    // Determine target login handle (Supports email, userIdentifier, or empCode payload keys)
+    const loginInput = (userIdentifier || email || empCode || "").trim();
+
+    if (!loginInput || !password) {
+      return res.status(400).json({ message: "Please provide Email/EmpCode and Password" });
+    }
+
+    // 1. Flexible search: Query by Email OR Employee Code in a single Prisma statement
+    const user = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { email: loginInput },
+          { employee: { empCode: loginInput } },
+        ],
+      },
       include: {
         employee: {
           include: {
-            designation: true, // Fetch designation object (e.g., Senior Associate)
-            department: true,  // Fetch department object
+            designation: true, // Populates designation object (e.g., "Senior Associate")
+            department: true,  // Populates department object
           },
         },
       },
@@ -331,19 +336,19 @@ exports.login = async (req, res, next) => {
 
     // 2. Validate user existence
     if (!user) {
-      return res.status(401).json({ message: "Invalid email or password" });
+      return res.status(401).json({ message: "Invalid credentials" });
     }
 
     // 3. Verify password match
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      return res.status(401).json({ message: "Invalid email or password" });
+      return res.status(401).json({ message: "Invalid credentials" });
     }
 
     // 4. Generate access and refresh tokens
     const tokens = generateTokens(user);
 
-    // 5. Return sanitized user data with populated designation & department names
+    // 5. Return sanitized user data with designation & department names
     return res.json({
       message: "Login successful",
       user: {
@@ -351,6 +356,7 @@ exports.login = async (req, res, next) => {
         name: user.name,
         email: user.email,
         role: user.role,
+        companyCode: companyCode || null,
         employeeId: user.employee ? user.employee.id : null,
         empCode: user.employee ? user.employee.empCode : null,
         designation: user.employee?.designation ? user.employee.designation.name : null,
@@ -375,7 +381,6 @@ exports.refresh = async (req, res, next) => {
       return res.status(401).json({ message: "Refresh token required" });
     }
 
-    // Verify token validity
     jwt.verify(
       refreshToken,
       process.env.JWT_REFRESH_SECRET || 'refreshSecret',
@@ -384,7 +389,6 @@ exports.refresh = async (req, res, next) => {
           return res.status(403).json({ message: "Invalid or expired refresh token" });
         }
 
-        // Fetch fresh user and employee data to build accurate payload
         const user = await prisma.user.findUnique({
           where: { id: decoded.id },
           include: { employee: true },
@@ -394,7 +398,6 @@ exports.refresh = async (req, res, next) => {
           return res.status(404).json({ message: "User no longer exists" });
         }
 
-        // Issue new access token
         const tokens = generateTokens(user);
         return res.json({ accessToken: tokens.accessToken });
       }
