@@ -1,0 +1,235 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==========================================
+// 🔴 ENUMS (System Dynamic Dropdowns & Rules)
+// ==========================================
+
+/// User Role: System access and permissions set karne ke liye
+enum Role {
+  ADMIN
+  HR
+  MANAGER
+  EMPLOYEE
+}
+
+/// Leave Status: Leave application ki current condition track karne ke liye
+enum LeaveStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+/// Attendance Status: Daily Attendance ka final verdict
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  HALF_DAY
+  ON_LEAVE
+}
+
+// ==========================================
+// 👤 USER & AUTHENTICATION
+// ==========================================
+
+/// User Model: System Authentication aur Login details ke liye
+model User {
+  id        Int      @id @default(autoincrement())
+  name      String   // User ka poora naam
+  email     String   @unique // Login ID (Unique hona zaroori hai)
+  password  String   // Hashed Password
+  role      Role     @default(EMPLOYEE) // Default Role Employee hoga
+  
+  // Relations
+  employee  Employee? // Employee Profile link (1-to-1 Relation)
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ==========================================
+// 🏢 ORGANIZATION STRUCTURE
+// ==========================================
+
+/// Department Model: Company ke departments (e.g. IT, HR, Sales)
+model Department {
+  id           Int           @id @default(autoincrement())
+  name         String        @unique // Department Name (e.g. "Software Engineering")
+  
+  // Relations
+  employees    Employee[]    // Department ke andar ke saare employees
+  designations Designation[] // Department ke andar ki designations
+}
+
+/// Designation Model: Employee ki Position/Job Title (e.g. Senior Developer)
+model Designation {
+  id           Int        @id @default(autoincrement())
+  name         String     // Designation Name
+  department   Department @relation(fields: [departmentId], references: [id])
+  departmentId Int        // Linked Department ID
+  
+  // Relations
+  employees    Employee[] // In designations waale saare employees
+}
+
+// ==========================================
+// 👨‍💼 EMPLOYEE PROFILE
+// ==========================================
+
+/// Employee Model: Employee ki Complete Profile aur HR Records
+model Employee {
+  id            Int            @id @default(autoincrement())
+  empCode       String         @unique // Employee Code (e.g. EMP001)
+  
+  // User Authentication Link
+  user          User           @relation(fields: [userId], references: [id])
+  userId        Int            @unique
+  
+  // Department & Designation Link
+  department    Department     @relation(fields: [departmentId], references: [id])
+  departmentId  Int
+  designation   Designation    @relation(fields: [designationId], references: [id])
+  designationId Int
+  
+  // Personal Details
+  phone         String?
+  address       String?
+  joiningDate   DateTime       @default(now())
+  status        String         @default("ACTIVE") // ACTIVE / INACTIVE / RESIGNED
+  
+  // Module Relations
+  attendances   Attendance[]   // Daily Attendance records
+  leaveRequests LeaveRequest[] // Applied Leave requests
+  leaveBalances LeaveBalance[] // Assigned Leave balances
+  payrolls      Payroll[]      // Salary Slip records
+  notifications Notification[] // Employee specific notifications
+  
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+}
+
+// ==========================================
+// ⏰ ATTENDANCE & MULTIPLE PUNCH SYSTEM
+// ==========================================
+
+/// Attendance Model: Din ka Main Record (1 Din = 1 Main Entry)
+/// Note: Din khatam hote hi (YYYY-MM-DD change) automatically next day reset ho jayega.
+model Attendance {
+  id         Int              @id @default(autoincrement())
+  employee   Employee         @relation(fields: [employeeId], references: [id])
+  employeeId Int
+  date       DateTime         @db.Date // Strictly Date (YYYY-MM-DD) for 1-day isolation
+  checkIn    DateTime?        // Din ka PEHLA Punch-In (First Punch)
+  checkOut   DateTime?        // Din ka AAKHRI Punch-Out (Last Punch)
+  status     AttendanceStatus @default(PRESENT)
+  
+  // 🟢 Multiple Session Logs Relation
+  // Ek din me multiple punches support karne ke liye:
+  punches    PunchLog[]       
+
+  // Unique Constraint: Ek employee ke liye ek tareeq me sirf 1 main row banegi
+  @@unique([employeeId, date])
+}
+
+/// 🟢 PunchLog Model: Din bhr ke har Check-In/Out ka detail timestamp track karne ke liye
+model PunchLog {
+  id           Int        @id @default(autoincrement())
+  attendance   Attendance @relation(fields: [attendanceId], references: [id], onDelete: Cascade)
+  attendanceId Int        // Main Daily Attendance ID
+  punchType    String     // "IN" (Check-In) ya "OUT" (Check-Out)
+  punchTime    DateTime   @default(now()) // Punch maarne ka exact timing
+}
+
+// ==========================================
+// 🌴 LEAVE MANAGEMENT SYSTEM
+// ==========================================
+
+/// LeaveType Model: Leave Types Rules (e.g. Casual Leave, Sick Leave)
+model LeaveType {
+  id            Int            @id @default(autoincrement())
+  name          String         @unique // Leave Type Name
+  maxDays       Int            // Yearly maximum allowed leaves
+  
+  // Relations
+  leaveRequests LeaveRequest[]
+  leaveBalances LeaveBalance[]
+}
+
+/// LeaveRequest Model: Employee dwara apply ki gayi Leaves
+model LeaveRequest {
+  id          Int         @id @default(autoincrement())
+  employee    Employee    @relation(fields: [employeeId], references: [id])
+  employeeId  Int
+  leaveType   LeaveType   @relation(fields: [leaveTypeId], references: [id])
+  leaveTypeId Int
+  fromDate    DateTime    @db.Date
+  toDate      DateTime    @db.Date
+  reason      String?
+  status      LeaveStatus @default(PENDING) // PENDING, APPROVED, REJECTED
+  createdAt   DateTime    @default(now())
+}
+
+/// LeaveBalance Model: Employee ka bacha hua Leave Balance Ledger
+model LeaveBalance {
+  id          Int       @id @default(autoincrement())
+  employee    Employee  @relation(fields: [employeeId], references: [id])
+  employeeId  Int
+  leaveType   LeaveType @relation(fields: [leaveTypeId], references: [id])
+  leaveTypeId Int
+  opening     Float     @default(0) // Saal ke shuru me mili leaves
+  credit      Float     @default(0) // Extra mili leaves
+  debit       Float     @default(0) // Deduct hui leaves
+  used        Float     @default(0) // Use ki gayi leaves
+  balance     Float     @default(0) // Remaining Balance (Calculated)
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([employeeId, leaveTypeId]) // Har employee ke paas 1 LeaveType ki 1 hi balance row hogi
+}
+
+// ==========================================
+// 💰 PAYROLL & NOTIFICATIONS & HOLIDAYS
+// ==========================================
+
+/// Payroll Model: Employee ki Monthly Salary calculation
+model Payroll {
+  id         Int      @id @default(autoincrement())
+  employee   Employee @relation(fields: [employeeId], references: [id])
+  employeeId Int
+  month      Int      // Salary Month (1-12)
+  year       Int      // Salary Year (e.g. 2026)
+  basic      Float    // Basic Salary
+  hra        Float    @default(0) // HRA Allowance
+  allowances Float    @default(0) // Other Allowances
+  deductions Float    @default(0) // PF / ESI / Absent Deductions
+  netSalary  Float    // Final In-Hand Salary
+  createdAt  DateTime @default(now())
+
+  @@unique([employeeId, month, year]) // Ek mahine ki ek hi salary slip hogi
+}
+
+/// Notification Model: In-App Push / System Alert Messages
+model Notification {
+  id         String   @id @default(uuid())
+  employeeId Int
+  title      String   // Notification Title
+  message    String   // Notification Body Text
+  type       String   // e.g. "LEAVE", "ATTENDANCE", "PAYROLL"
+  isRead     Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+}
+
+/// Holiday Model: Company Official Holidays List
+model Holiday {
+  id        String   @id @default(uuid())
+  name      String   // Holiday Name (e.g. "Diwali")
+  date      DateTime // Holiday Date
+  createdAt DateTime @default(now())
+}
