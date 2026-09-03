@@ -181,7 +181,6 @@ const prisma = require("../config/prisma");
 
 /**
  * Helper function to generate JWT Access and Refresh Tokens
- * Includes essential user identity and employee details in payload
  */
 function generateTokens(user) {
   const payload = {
@@ -215,80 +214,91 @@ exports.register = async (req, res, next) => {
   try {
     const { name, email, password, role, empCode, departmentId, designationId, phone } = req.body;
 
-    // 1. Verify if user email already exists
-    const existing = await prisma.user.findUnique({ where: { email } });
-    if (existing) {
+    const normalizedEmail = email?.toLowerCase().trim();
+    const finalEmpCode = empCode?.trim() || `EMP${Date.now().toString().slice(-4)}`;
+
+    // 1. Verify if user email or empCode already exists
+    const existingUser = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+    if (existingUser) {
       return res.status(400).json({ message: "Email already registered" });
     }
 
-    // 2. Resolve Department ID safely (Fallback to default 'IT' department)
-    let targetDeptId = departmentId ? parseInt(departmentId, 10) : null;
-    if (targetDeptId) {
-      const deptExists = await prisma.department.findUnique({ where: { id: targetDeptId } });
-      if (!deptExists) targetDeptId = null;
+    const existingEmp = await prisma.employee.findUnique({ where: { empCode: finalEmpCode } });
+    if (existingEmp) {
+      return res.status(400).json({ message: "Employee Code already in use" });
     }
 
-    if (!targetDeptId) {
-      const defaultDept = await prisma.department.upsert({
-        where: { name: 'IT' },
-        update: {},
-        create: { name: 'IT' },
-      });
-      targetDeptId = defaultDept.id;
-    }
-
-    // 3. Resolve Designation ID safely (Fallback to default 'Software Engineer')
-    let targetDesigId = designationId ? parseInt(designationId, 10) : null;
-    if (targetDesigId) {
-      const desigExists = await prisma.designation.findUnique({ where: { id: targetDesigId } });
-      if (!desigExists) targetDesigId = null;
-    }
-
-    if (!targetDesigId) {
-      let defaultDesig = await prisma.designation.findFirst({
-        where: { departmentId: targetDeptId },
-      });
-      if (!defaultDesig) {
-        defaultDesig = await prisma.designation.create({
-          data: {
-            name: 'Software Engineer',
-            departmentId: targetDeptId,
-          },
-        });
+    // 2. Wrap creation in a Prisma Transaction
+    const newUser = await prisma.$transaction(async (tx) => {
+      // Resolve Department
+      let targetDeptId = departmentId ? parseInt(departmentId, 10) : null;
+      if (targetDeptId) {
+        const deptExists = await tx.department.findUnique({ where: { id: targetDeptId } });
+        if (!deptExists) targetDeptId = null;
       }
-      targetDesigId = defaultDesig.id;
-    }
 
-    // 4. Hash user password
-    const hashedPassword = await bcrypt.hash(password, 10);
+      if (!targetDeptId) {
+        const defaultDept = await tx.department.upsert({
+          where: { name: 'IT' },
+          update: {},
+          create: { name: 'IT' },
+        });
+        targetDeptId = defaultDept.id;
+      }
 
-    // 5. Create User and linked Employee record
-    const user = await prisma.user.create({
-      data: {
-        name,
-        email,
-        password: hashedPassword,
-        role: role || "EMPLOYEE",
-        employee: {
-          create: {
-            empCode: empCode || `EMP${Date.now().toString().slice(-4)}`,
-            departmentId: targetDeptId,
-            designationId: targetDesigId,
-            phone: phone || "",
+      // Resolve Designation
+      let targetDesigId = designationId ? parseInt(designationId, 10) : null;
+      if (targetDesigId) {
+        const desigExists = await tx.designation.findUnique({ where: { id: targetDesigId } });
+        if (!desigExists) targetDesigId = null;
+      }
+
+      if (!targetDesigId) {
+        let defaultDesig = await tx.designation.findFirst({
+          where: { departmentId: targetDeptId },
+        });
+        if (!defaultDesig) {
+          defaultDesig = await tx.designation.create({
+            data: {
+              name: 'Software Engineer',
+              departmentId: targetDeptId,
+            },
+          });
+        }
+        targetDesigId = defaultDesig.id;
+      }
+
+      // Hash Password
+      const hashedPassword = await bcrypt.hash(password, 10);
+
+      // Create User & Employee
+      return await tx.user.create({
+        data: {
+          name,
+          email: normalizedEmail,
+          password: hashedPassword,
+          role: role || "EMPLOYEE",
+          employee: {
+            create: {
+              empCode: finalEmpCode,
+              departmentId: targetDeptId,
+              designationId: targetDesigId,
+              phone: phone || "",
+            },
           },
         },
-      },
-      include: {
-        employee: {
-          include: {
-            designation: true,
-            department: true,
+        include: {
+          employee: {
+            include: {
+              designation: true,
+              department: true,
+            },
           },
         },
-      },
+      });
     });
 
-    const { password: _, ...userWithoutPassword } = user;
+    const { password: _, ...userWithoutPassword } = newUser;
 
     return res.status(201).json({
       message: "User registered successfully",
@@ -309,46 +319,41 @@ exports.login = async (req, res, next) => {
   try {
     const { email, userIdentifier, empCode, password, companyCode } = req.body;
 
-    // Determine target login handle (Supports email, userIdentifier, or empCode payload keys)
     const loginInput = (userIdentifier || email || empCode || "").trim();
 
     if (!loginInput || !password) {
       return res.status(400).json({ message: "Please provide Email/EmpCode and Password" });
     }
 
-    // 1. Flexible search: Query by Email OR Employee Code in a single Prisma statement
+    // Search with case-insensitivity (mode: 'insensitive')
     const user = await prisma.user.findFirst({
       where: {
         OR: [
-          { email: loginInput },
-          { employee: { empCode: loginInput } },
+          { email: { equals: loginInput, mode: 'insensitive' } },
+          { employee: { empCode: { equals: loginInput, mode: 'insensitive' } } },
         ],
       },
       include: {
         employee: {
           include: {
-            designation: true, // Populates designation object (e.g., "Senior Associate")
-            department: true,  // Populates department object
+            designation: true,
+            department: true,
           },
         },
       },
     });
 
-    // 2. Validate user existence
     if (!user) {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    // 3. Verify password match
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    // 4. Generate access and refresh tokens
     const tokens = generateTokens(user);
 
-    // 5. Return sanitized user data with designation & department names
     return res.json({
       message: "Login successful",
       user: {
